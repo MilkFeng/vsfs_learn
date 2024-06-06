@@ -11,6 +11,10 @@ impl Path {
         }
     }
 
+    pub fn is_root(&self) -> bool {
+        self.segs.is_empty()
+    }
+
     fn check_seg_valid(seg: &str) -> bool {
         if seg.is_empty() {
             return false;
@@ -94,6 +98,11 @@ impl Path {
 
         self.segs.push(seg);
     }
+
+    pub fn move_push(mut self, seg: String) -> Path {
+        self.push(seg);
+        self
+    }
 }
 
 
@@ -104,7 +113,7 @@ mod tests {
     #[test]
     fn test_path() {
         let path = Path::from_str("/a/b/c").unwrap();
-        assert_eq!(path.to_str(), "/a/b/c/");
+        assert_eq!(path.to_str(), "/a/b/c");
         assert_eq!(path.segs(), &vec!["a".to_string(), "b".to_string(), "c".to_string()]);
     }
 

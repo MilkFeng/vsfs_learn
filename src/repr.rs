@@ -3,7 +3,9 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem::ManuallyDrop;
+use std::ops::Deref;
 use std::path::Path;
+
 use crate::io::{Loadable, Savable};
 
 /// 128 MB
@@ -48,6 +50,7 @@ impl Debug for Disk {
 #[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 pub struct INode {
     pub size: u32,                                      // 文件大小
+    pub is_dir: bool,                                   // 是否是目录
 
     pub atime: u32,                                     // 文件最近一次被访问的时间
     pub ctime: u32,                                     // 文件的创建时间

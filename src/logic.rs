@@ -18,6 +18,13 @@ pub struct DirectoryData {
     pub entries: Vec<DirectoryEntry>,
 }
 
+impl DirectoryData {
+    pub fn exists(&self, name: &str) -> bool {
+        self.entries.iter()
+            .any(|entry| entry.name == name)
+    }
+}
+
 /// 获取 bitmap 状态，true 表示已经被占用，false 表示空闲
 pub fn get_state(bitmap_blocks: &[BitmapBlock], index: usize) -> bool {
     let block_index = index / (ALIGN_SIZE * 32);
@@ -91,13 +98,13 @@ pub fn get_free_block(bitmap_blocks: &[BitmapBlock], range: Range<usize>) -> Opt
 }
 
 /// 所有索引块的范围
-const ALL_INODE_RANGE: Range<usize> = 0..INDEX_BLOCK_COUNT * 32;
+pub const ALL_INODE_RANGE: Range<usize> = 0..INDEX_BLOCK_COUNT * 32;
 
 /// 所有的索引块范围
-const ALL_INDEX_BLOCK_RANGE: Range<usize> = 0..INDEX_BLOCK_COUNT;
+pub const ALL_INDEX_BLOCK_RANGE: Range<usize> = 0..INDEX_BLOCK_COUNT;
 
 /// 所有数据块的范围
-const ALL_DATA_BLOCK_RANGE: Range<usize> = 0..DATA_BLOCK_COUNT;
+pub const ALL_DATA_BLOCK_RANGE: Range<usize> = 0..DATA_BLOCK_COUNT;
 
 
 /// 获取 inode
@@ -276,7 +283,7 @@ pub fn get_size_of_data_block(inode: &INode, index: usize) -> usize {
     }
 
     if index == inode.block_count as usize - 1 {
-        inode.size as usize % 4096
+        (inode.size as usize - 1) % 4096 + 1
     } else {
         4096
     }
@@ -343,7 +350,9 @@ pub fn write_data(
     let inode = unsafe { get_inode(index_blocks, inum) };
 
     let mut written = 0;
+    let mut cnt = 0;
     while written < buf.len() {
+        cnt = cnt + 1;
         let (dnum, offset) = transform_pos(index_blocks, inum, start_pos + written);
 
         let data = get_data_block_mut(data_blocks, dnum);
@@ -356,6 +365,25 @@ pub fn write_data(
         data[offset..offset + len].copy_from_slice(&buf[written..written + len]);
         written += len;
     }
+}
+
+/// 写入数据，自动调整大小
+pub fn write_data_auto_resize(
+    index_bitmap_blocks: &mut [BitmapBlock],
+    data_bitmap_blocks: &mut [BitmapBlock],
+    index_blocks: &mut [IBlock],
+    data_blocks: &mut [DataBlock],
+    inum: usize,
+    start_pos: usize,
+    buf: &[u8]
+) {
+    let new_size = start_pos + buf.len();
+    let inode = unsafe { get_inode(index_blocks, inum) };
+    if new_size != inode.size as usize {
+        resize(index_bitmap_blocks, data_bitmap_blocks, index_blocks, inum, new_size);
+    }
+
+    write_data(data_blocks, index_blocks, inum, start_pos, buf);
 }
 
 /// 设置大小
@@ -452,6 +480,7 @@ mod test {
     fn test_transform_pos() {
         let inode = INode {
             size: 3134333,
+            is_dir: false,
             atime: 0,
             ctime: 0,
             mtime: 0,
@@ -508,6 +537,7 @@ mod test {
         let inode = unsafe { get_inode_mut(&mut disk.i_blocks, 0) };
         *inode = INode {
             size: 23423,
+            is_dir: false,
             atime: 0,
             ctime: 0,
             mtime: 0,
@@ -556,6 +586,7 @@ mod test {
     fn test_get_data_size() {
         let inode = INode {
             size: 4096 * 3 + 234,
+            is_dir: false,
             atime: 0,
             ctime: 0,
             mtime: 0,
@@ -576,6 +607,7 @@ mod test {
     fn test_get_dnum_panic() {
         let inode = INode {
             size: 4096 * 3 + 234,
+            is_dir: false,
             atime: 0,
             ctime: 0,
             mtime: 0,
@@ -597,6 +629,7 @@ mod test {
 
             *inode = INode {
                 size: 4096 * 3 + 234,
+                is_dir: false,
                 atime: 0,
                 ctime: 0,
                 mtime: 0,
@@ -672,6 +705,7 @@ mod test {
 
         *inode = INode {
             size: 4096 * 3 + 234,
+            is_dir: false,
             atime: 0,
             ctime: 0,
             mtime: 0,
@@ -729,11 +763,58 @@ mod test {
     }
 
     #[test]
+    fn test_rw() {
+        let mut disk = Disk::new();
+        let inode = unsafe { get_inode_mut(&mut disk.i_blocks, 0) };
+
+        *inode = INode {
+            size: 0,
+            is_dir: false,
+            atime: 0,
+            ctime: 0,
+            mtime: 0,
+            dtime: 0,
+            block_count: 0,
+            block_direct: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            block_indirect: 0,
+        };
+        disk.d_bitmaps[0].bitmaps[0] = 0;
+        disk.i_bitmaps[0].bitmaps[0] = 1;
+
+        let i_bitmaps = &mut disk.i_bitmaps;
+        let d_bitmaps = &mut disk.d_bitmaps;
+        let i_blocks = &mut disk.i_blocks;
+        let d_blocks = &mut disk.d_blocks;
+
+        let mut buf = vec![0; 4096 * 3 + 234];
+        for i in 0..buf.len() {
+            buf[i] = i as u8;
+        }
+
+        write_data_auto_resize(
+            i_bitmaps,
+            d_bitmaps,
+            i_blocks,
+            d_blocks,
+            0, 0, &buf
+        );
+
+        assert_eq!(unsafe { get_inode(i_blocks, 0) }.block_count, 4);
+        assert_eq!(unsafe { get_inode(i_blocks, 0) }.size, 4096 * 3 + 234);
+
+        let mut read_buf = vec![0; 4096 * 3 + 234];
+        read_data(d_blocks, i_blocks, 0, 0, &mut read_buf);
+
+        assert_eq!(buf, read_buf);
+    }
+
+    #[test]
     fn test_extend_data_block() {
         let mut disk = Disk::new();
         let inode = unsafe { get_inode_mut(&mut disk.i_blocks, 0) };
         *inode = INode {
             size: 0,
+            is_dir: false,
             atime: 0,
             ctime: 0,
             mtime: 0,
@@ -812,6 +893,7 @@ mod test {
         let inode = unsafe { get_inode_mut(&mut disk.i_blocks, 0) };
         *inode = INode {
             size: 0,
+            is_dir: false,
             atime: 0,
             ctime: 0,
             mtime: 0,
