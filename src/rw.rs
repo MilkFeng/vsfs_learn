@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Hash, Eq, PartialEq, Copy, Clone)]
+#[derive(Hash, Eq, PartialEq, Copy, Clone, Debug)]
 pub enum AccessMode {
     Read,
     Write,
@@ -8,22 +8,10 @@ pub enum AccessMode {
 }
 
 #[derive(Hash, Eq, PartialEq)]
-struct OpenFileEntry {
+struct RWTableEntry {
     pid: usize,                         // 进程 ID
     path: String,                       // 文件路径
     mode: AccessMode,                   // 文件打开模式
-}
-
-#[derive(Hash, Eq, PartialEq)]
-struct OpenDirectoryEntry {
-    pid: usize,                         // 进程 ID
-    path: String,                       // 目录路径
-}
-
-#[derive(Hash, Eq, PartialEq)]
-enum RWTableEntry {
-    File(OpenFileEntry),
-    Directory(OpenDirectoryEntry),
 }
 
 struct OpenTable {
@@ -40,21 +28,11 @@ impl OpenTable {
 
     /// 打开文件
     fn open_file(&mut self, pid: usize, path: &str, mode: AccessMode) -> usize {
-        let entry = RWTableEntry::File(OpenFileEntry {
+        let entry = RWTableEntry{
             pid,
             path: path.to_string(),
             mode,
-        });
-        self.entries.push((entry, false));
-        self.entries.len() - 1
-    }
-
-    /// 打开目录
-    fn open_directory(&mut self, pid: usize, path: &str) -> usize {
-        let entry = RWTableEntry::Directory(OpenDirectoryEntry {
-            pid,
-            path: path.to_string(),
-        });
+        };
         self.entries.push((entry, false));
         self.entries.len() - 1
     }
@@ -117,7 +95,7 @@ impl RWManager {
     }
 
     /// 打开文件
-    pub fn open_file(&mut self, pid: usize, path: &str, mode: AccessMode) -> usize {
+    pub fn open(&mut self, pid: usize, path: &str, mode: AccessMode) -> usize {
         let entry_id = self.open_table.open_file(pid, path, mode);
         match mode {
             AccessMode::Read => {
@@ -143,68 +121,51 @@ impl RWManager {
                 if *deleted {
                     return;
                 }
-                match entry {
-                    RWTableEntry::File(file) => {
-                        self.file_rw_table.set_read(&file.path, file.mode == AccessMode::Read || file.mode == AccessMode::ReadWrite);
-                        self.file_rw_table.set_write(&file.path, file.mode == AccessMode::Write || file.mode == AccessMode::ReadWrite);
-                    }
-                    RWTableEntry::Directory(_) => {}
-                }
+                self.file_rw_table.set_read(&entry.path, entry.mode == AccessMode::Read || entry.mode == AccessMode::ReadWrite);
+                self.file_rw_table.set_write(&entry.path, entry.mode == AccessMode::Write || entry.mode == AccessMode::ReadWrite);
+
             });
     }
 
-    /// 打开目录
-    pub fn open_directory(&mut self, pid: usize, path: &str) -> usize {
-        self.open_table.open_directory(pid, path)
-    }
-
     /// 关闭文件
-    pub fn close_file(&mut self, id: usize) {
+    pub fn close(&mut self, id: usize) {
         self.open_table.close(id);
         self.update_state();
     }
 
-    /// 关闭目录
-    pub fn close_directory(&mut self, id: usize) {
-        self.open_table.close(id);
-    }
-
     /// 是否可以写文件
-    pub fn file_can_write(&self, path: &str) -> bool {
+    pub fn can_write(&self, path: &str) -> bool {
         self.file_rw_table.can_write(path)
     }
 
-    /// 是否目录已经打开
-    pub fn dir_is_open(&self, pid: usize, path: &str) -> bool {
-        self.open_table.entries.iter()
-            .any(|(entry, deleted)| {
-                if *deleted {
-                    return false;
-                }
-                match entry {
-                    RWTableEntry::File(_) => false,
-                    RWTableEntry::Directory(dir) => dir.pid == pid && dir.path == path,
-                }
-            })
-    }
-
     /// 是否文件已经打开
-    pub fn file_is_open(&self, pid: usize, path: &str, mode: AccessMode) -> bool {
+    pub fn is_open(&self, pid: usize, path: &str, mode: AccessMode) -> bool {
         self.open_table.entries.iter()
             .any(|(entry, deleted)| {
                 if *deleted {
                     return false;
                 }
-                match entry {
-                    RWTableEntry::File(file) => file.pid == pid && file.path == path && file.mode == mode,
-                    RWTableEntry::Directory(_) => false,
-                }
+                entry.pid == pid && entry.path == path && entry.mode == mode
             })
     }
 
     /// 是否文件已经删除
-    pub fn if_delete(&self, id: usize) -> bool {
+    fn is_deleted(&self, id: usize) -> bool {
         self.open_table.entries[id].1
+    }
+
+    /// 是否仍然打开
+    pub fn already_open(&self, id: usize) -> bool {
+        self.is_deleted(id)
+    }
+
+    /// 根据 id 获得读写模式
+    pub fn access_mode(&self, id: usize) -> Option<AccessMode> {
+        if self.is_deleted(id) {
+            None
+        } else {
+            Some(self.open_table.entries[id].0.mode)
+        }
     }
 }
 
@@ -216,37 +177,26 @@ mod test {
     #[test]
     fn test_rw_manager() {
         let mut rw_manager = RWManager::new();
-        let x = rw_manager.open_file(1, "test.txt", AccessMode::Read);
-        assert_eq!(rw_manager.file_can_write("test.txt"), true);
+        let x = rw_manager.open(1, "test.txt", AccessMode::Read);
+        assert_eq!(rw_manager.can_write("test.txt"), true);
 
-        rw_manager.close_file(x);
+        rw_manager.close(x);
 
-        let x = rw_manager.open_file(1, "test.txt", AccessMode::Write);
-        assert_eq!(rw_manager.file_can_write("test.txt"), false);
+        let x = rw_manager.open(1, "test.txt", AccessMode::Write);
+        assert_eq!(rw_manager.can_write("test.txt"), false);
 
-        rw_manager.close_file(x);
+        rw_manager.close(x);
 
-        let x = rw_manager.open_file(1, "test.txt", AccessMode::ReadWrite);
-        assert_eq!(rw_manager.file_can_write("test.txt"), false);
-        assert_eq!(rw_manager.file_is_open(1, "test.txt", AccessMode::Read), false);
-        assert_eq!(rw_manager.file_is_open(1, "test.txt", AccessMode::Write), false);
-        assert_eq!(rw_manager.file_is_open(1, "test.txt", AccessMode::ReadWrite), true);
+        let x = rw_manager.open(1, "test.txt", AccessMode::ReadWrite);
+        assert_eq!(rw_manager.can_write("test.txt"), false);
+        assert_eq!(rw_manager.is_open(1, "test.txt", AccessMode::Read), false);
+        assert_eq!(rw_manager.is_open(1, "test.txt", AccessMode::Write), false);
+        assert_eq!(rw_manager.is_open(1, "test.txt", AccessMode::ReadWrite), true);
 
-        assert_eq!(rw_manager.file_can_write("test.txt"), false);
-        rw_manager.close_file(x);
+        assert_eq!(rw_manager.can_write("test.txt"), false);
+        rw_manager.close(x);
 
-        assert_eq!(rw_manager.file_can_write("test.txt"), true);
-        assert_eq!(rw_manager.file_is_open(1, "test.txt", AccessMode::Read), false);
-    }
-
-    #[test]
-    fn test_rw_manager_dir() {
-        let mut rw_manager = RWManager::new();
-
-        let x = rw_manager.open_directory(1, "test");
-        assert_eq!(rw_manager.dir_is_open(1, "test"), true);
-
-        rw_manager.close_directory(x);
-        assert_eq!(rw_manager.dir_is_open(1, "test"), false);
+        assert_eq!(rw_manager.can_write("test.txt"), true);
+        assert_eq!(rw_manager.is_open(1, "test.txt", AccessMode::Read), false);
     }
 }

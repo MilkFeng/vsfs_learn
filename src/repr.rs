@@ -3,7 +3,6 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem::ManuallyDrop;
-use std::ops::Deref;
 use std::path::Path;
 
 use crate::io::{Loadable, Savable};
@@ -55,7 +54,6 @@ pub struct INode {
     pub atime: u32,                                     // 文件最近一次被访问的时间
     pub ctime: u32,                                     // 文件的创建时间
     pub mtime: u32,                                     // 文件最近一次被修改的时间
-    pub dtime: u32,                                     // 这个 inode 被删除的时间
 
     pub block_count: u32,                               // 这个 inode 占用的块数（包括直接块和间接块）
     pub block_direct: [u32; DIRECT_BLOCK_COUNT],        // 直接块，存放数据块编号

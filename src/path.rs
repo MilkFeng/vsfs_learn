@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Path {
     segs: Vec<String>,
@@ -77,15 +76,12 @@ impl Path {
         self.segs.into_iter()
     }
 
-    pub fn parent(&self) -> Option<Path> {
+    pub fn parent(mut self) -> Option<Path> {
         if self.segs.is_empty() {
             return None;
         }
-        let mut segs = self.segs.clone();
-        if let Some(_) = segs.pop() {
-            Some(Path {
-                segs,
-            })
+        if let Some(_) = self.segs.pop() {
+            Some(self)
         } else {
             None
         }
@@ -102,6 +98,10 @@ impl Path {
     pub fn move_push(mut self, seg: String) -> Path {
         self.push(seg);
         self
+    }
+
+    pub fn current(&self) -> Option<&String> {
+        self.segs.last()
     }
 }
 

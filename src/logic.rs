@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,20 @@ impl DirectoryData {
     pub fn exists(&self, name: &str) -> bool {
         self.entries.iter()
             .any(|entry| entry.name == name)
+    }
+}
+
+impl Deref for DirectoryData {
+    type Target = Vec<DirectoryEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl DerefMut for DirectoryData {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.entries
     }
 }
 
@@ -160,11 +174,11 @@ pub fn get_dnum(index_blocks: &[IBlock], inum: usize, index: usize) -> &u32 {
     if index >= inode.block_count as usize {
         panic!("index out of range")
     }
-    if index < 12 {
+    if index < DIRECT_BLOCK_COUNT {
         &inode.block_direct[index]
-    } else if index < 12 + 1024 {
+    } else if index < DIRECT_BLOCK_COUNT + 1024 {
         let index_data_block = inode.block_indirect as usize;
-        unsafe { get_indirect_dnum(index_blocks, index_data_block, index - 12) }
+        unsafe { get_indirect_dnum(index_blocks, index_data_block, index - DIRECT_BLOCK_COUNT) }
     } else {
         panic!("index out of range")
     }
@@ -172,19 +186,19 @@ pub fn get_dnum(index_blocks: &[IBlock], inum: usize, index: usize) -> &u32 {
 
 /// 在 inode_blocks 中根据 inode 中的信息获取 index 对应的可变编号
 pub fn get_dnum_mut(index_blocks: &mut [IBlock], inum: usize, index: usize) -> &mut u32 {
-    if index < 12 {
+    if index < DIRECT_BLOCK_COUNT {
         let inode = unsafe { get_inode_mut(index_blocks, inum) };
         if index >= inode.block_count as usize {
             panic!("index out of range")
         }
         &mut inode.block_direct[index]
-    } else if index < 12 + 1024 {
+    } else if index < DIRECT_BLOCK_COUNT + 1024 {
         let inode = unsafe { get_inode(index_blocks, inum) };
         let index_data_block = inode.block_indirect as usize;
         if index >= inode.block_count as usize {
             panic!("index out of range")
         }
-        unsafe { get_indirect_dnum_mut(index_blocks, index_data_block, index - 12) }
+        unsafe { get_indirect_dnum_mut(index_blocks, index_data_block, index - DIRECT_BLOCK_COUNT) }
     } else {
         panic!("index out of range")
     }
@@ -203,7 +217,7 @@ pub fn extend_data_block_of_inode(
         return;
     }
 
-    if count <= 12 {
+    if count <= DIRECT_BLOCK_COUNT {
         let inode = unsafe { get_inode_mut(index_blocks, inum) };
         // 直接
         for i in inode.block_count as usize..count {
@@ -215,13 +229,13 @@ pub fn extend_data_block_of_inode(
     } else {
 
         let inode = unsafe { get_inode(index_blocks, inum) }.clone();
-        if inode.block_count < 12 {
-            // 直接的扩充到 12
+        if inode.block_count < DIRECT_BLOCK_COUNT as u32 {
+            // 直接的扩充到 DIRECT_BLOCK_COUNT
             extend_data_block_of_inode(
                 index_bitmap_blocks,
                 data_bitmap_blocks,
                 index_blocks,
-                inum, 12
+                inum, DIRECT_BLOCK_COUNT
             );
 
             // 申请一个间接块
@@ -237,7 +251,7 @@ pub fn extend_data_block_of_inode(
         for i in inode.block_count as usize..count {
             let dnum = get_free_item(data_bitmap_blocks, ALL_DATA_BLOCK_RANGE).unwrap();
             let target_dnum = unsafe {
-                get_indirect_dnum_mut(index_blocks, inode.block_indirect as usize, i - 12)
+                get_indirect_dnum_mut(index_blocks, inode.block_indirect as usize, i - DIRECT_BLOCK_COUNT)
             };
             set_state(data_bitmap_blocks, dnum, true);
             *target_dnum = dnum as u32;
@@ -245,6 +259,67 @@ pub fn extend_data_block_of_inode(
         let inode = unsafe { get_inode_mut(index_blocks, inum) };
         inode.block_count = count as u32;
         return;
+    }
+}
+
+/// 缩减数据块
+pub fn shrink_data_block_of_inode(
+    index_bitmap_blocks: &mut [BitmapBlock],
+    data_bitmap_blocks: &mut [BitmapBlock],
+    index_blocks: &mut [IBlock],
+    inum: usize,
+    count: usize
+) {
+    let inode = unsafe { get_inode(index_blocks, inum) }.clone();
+    if inode.block_count as usize <= count {
+        return;
+    }
+
+    // 先释放掉数据块
+    for i in count..inode.block_count as usize {
+        let dnum = get_dnum_mut(index_blocks, inum, i);
+        set_state(data_bitmap_blocks, *dnum as usize, false);
+        *dnum = 0;
+    }
+
+    // 如果之前存在 indirect，之后不存在，则释放掉 indirect
+    if count <= DIRECT_BLOCK_COUNT && inode.block_count as usize > DIRECT_BLOCK_COUNT {
+        let state = get_block_state(
+            index_bitmap_blocks,
+            inode.block_indirect as usize
+        );
+        if state != u32::MAX && state != 0 {
+            panic!("block state panic!");
+        }
+
+        unsafe {
+            set_block_state(
+                index_bitmap_blocks,
+                inode.block_indirect as usize,
+                false
+            );
+        }
+
+        let inode = unsafe { get_inode_mut(index_blocks, inum) };
+        inode.block_indirect = 0;
+    }
+
+    let inode = unsafe { get_inode_mut(index_blocks, inum) };
+    inode.block_count = count as u32;
+}
+
+pub fn resize_data_block_of_inode(
+    index_bitmap_blocks: &mut [BitmapBlock],
+    data_bitmap_blocks: &mut [BitmapBlock],
+    index_blocks: &mut [IBlock],
+    inum: usize,
+    count: usize
+) {
+    let inode = unsafe { get_inode(index_blocks, inum) }.clone();
+    if inode.block_count < count as u32 {
+        extend_data_block_of_inode(index_bitmap_blocks, data_bitmap_blocks, index_blocks, inum, count);
+    } else if inode.block_count > count as u32 {
+        shrink_data_block_of_inode(index_bitmap_blocks, data_bitmap_blocks, index_blocks, inum, count);
     }
 }
 
@@ -394,23 +469,12 @@ pub fn resize(
     inum: usize,
     new_size: usize
 ) {
-    let inode = unsafe { get_inode(index_blocks, inum) };
-    let old_block_count = inode.block_count as usize;
-
     let new_block_count = (new_size + 4095) / 4096;
 
-    if new_block_count > old_block_count {
-        extend_data_block_of_inode(index_bitmap_blocks, data_bitmap_blocks, index_blocks, inum, new_block_count);
-    } else if new_block_count < old_block_count {
-        for i in new_block_count..old_block_count {
-            let dnum = *get_dnum(index_blocks, inum, i) as usize;
-            set_state(data_bitmap_blocks, dnum, false);
-        }
-    }
+    resize_data_block_of_inode(index_bitmap_blocks, data_bitmap_blocks, index_blocks, inum, new_block_count);
 
     let inode = unsafe { get_inode_mut(index_blocks, inum) };
     inode.size = new_size as u32;
-    inode.block_count = new_block_count as u32;
 }
 
 /// 读取数据结构
@@ -484,7 +548,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 15,
             block_direct: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             block_indirect: 1,
@@ -541,7 +604,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 14,
             block_direct: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             block_indirect: 1,
@@ -590,7 +652,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 4,
             block_direct: [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0],
             block_indirect: 0,
@@ -611,7 +672,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 4,
             block_direct: [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0],
             block_indirect: 0,
@@ -633,7 +693,6 @@ mod test {
                 atime: 0,
                 ctime: 0,
                 mtime: 0,
-                dtime: 0,
                 block_count: 4,
                 block_direct: [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0],
                 block_indirect: 0,
@@ -675,6 +734,16 @@ mod test {
         assert_eq!(get_state(d_bitmaps, 4), false);
         assert_eq!(get_state(d_bitmaps, 5), false);
         assert_eq!(get_state(d_bitmaps, 6), false);
+
+        resize(i_bitmaps, d_bitmaps, i_blocks, 0, 0);
+        let inode = unsafe { get_inode_mut(i_blocks, 0) };
+        assert_eq!(inode.size, 0);
+        assert_eq!(inode.block_count, 0);
+
+        assert_eq!(get_state(d_bitmaps, 0), false);
+        assert_eq!(get_state(d_bitmaps, 1), false);
+        assert_eq!(get_state(d_bitmaps, 2), false);
+        assert_eq!(get_state(d_bitmaps, 3), false);
     }
 
     #[test]
@@ -709,7 +778,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 4,
             block_direct: [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0],
             block_indirect: 0,
@@ -773,7 +841,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 0,
             block_direct: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             block_indirect: 0,
@@ -809,7 +876,7 @@ mod test {
     }
 
     #[test]
-    fn test_extend_data_block() {
+    fn test_extend_shrink_data_block() {
         let mut disk = Disk::new();
         let inode = unsafe { get_inode_mut(&mut disk.i_blocks, 0) };
         *inode = INode {
@@ -818,7 +885,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 0,
             block_direct: [0; 12],
             block_indirect: 0,
@@ -877,6 +943,8 @@ mod test {
         assert_eq!(inode.block_direct[8], 8);
         assert_eq!(inode.block_direct[11], 11);
 
+        assert_ne!(inode.block_indirect, 0);
+
         unsafe {
             for i in 12u32..18u32 {
                 assert_eq!(*get_indirect_dnum(i_blocks, inode.block_indirect as usize, i as usize - 12), i);
@@ -885,6 +953,45 @@ mod test {
             assert_eq!(*get_indirect_dnum(i_blocks, inode.block_indirect as usize, 100), 0);
             println!("{:?}", get_indirect_block(i_blocks, inode.block_indirect as usize));
         }
+
+
+        shrink_data_block_of_inode(
+            i_bitmaps,
+            d_bitmaps,
+            i_blocks,
+            0, 10,
+        );
+
+        let inode = unsafe { get_inode(i_blocks, 0) };
+
+        println!("{:?}", inode);
+
+        assert_eq!(inode.block_count, 10);
+        assert_eq!(inode.block_direct[4], 4);
+        assert_eq!(inode.block_direct[5], 5);
+        assert_eq!(inode.block_direct[6], 6);
+        assert_eq!(inode.block_direct[8], 8);
+
+        assert_eq!(inode.block_direct[11], 0);
+        assert_eq!(inode.block_indirect, 0);
+
+
+        shrink_data_block_of_inode(
+            i_bitmaps,
+            d_bitmaps,
+            i_blocks,
+            0, 0,
+        );
+
+        let inode = unsafe { get_inode(i_blocks, 0) };
+
+        println!("{:?}", inode);
+
+        assert_eq!(inode.block_count, 0);
+        assert_eq!(inode.block_direct[4], 0);
+        assert_eq!(inode.block_direct[5], 0);
+        assert_eq!(inode.block_direct[6], 0);
+        assert_eq!(inode.block_direct[8], 0);
     }
 
     #[test]
@@ -897,7 +1004,6 @@ mod test {
             atime: 0,
             ctime: 0,
             mtime: 0,
-            dtime: 0,
             block_count: 0,
             block_direct: [0; 12],
             block_indirect: 0,
